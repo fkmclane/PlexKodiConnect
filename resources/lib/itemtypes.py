@@ -1776,14 +1776,6 @@ class Music(Items):
                                  checksum=checksum,
                                  view_id=viewid)
 
-        # Link song to album
-        query = '''
-            INSERT OR REPLACE INTO albuminfosong(
-                idAlbumInfoSong, idAlbumInfo, iTrack, strTitle, iDuration)
-            VALUES (?, ?, ?, ?, ?)
-        '''
-        kodicursor.execute(query, (songid, albumid, track, title, duration))
-
         # Link song to artists
         artist_loop = [{
             'Name': item.attrib.get('grandparentTitle'),

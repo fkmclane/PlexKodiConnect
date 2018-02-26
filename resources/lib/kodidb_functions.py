@@ -1088,38 +1088,7 @@ class KodiDBMethods(object):
 
     def addMusicGenres(self, kodiid, genres, mediatype):
 
-        if mediatype == "album":
-
-            # Delete current genres for clean slate
-            query = ' '.join((
-
-                "DELETE FROM album_genre",
-                "WHERE idAlbum = ?"
-            ))
-            self.cursor.execute(query, (kodiid,))
-
-            for genre in genres:
-                query = ' '.join((
-
-                    "SELECT idGenre",
-                    "FROM genre",
-                    "WHERE strGenre = ?",
-                    "COLLATE NOCASE"
-                ))
-                self.cursor.execute(query, (genre,))
-                try:
-                    genreid = self.cursor.fetchone()[0]
-                except TypeError:
-                    # Create the genre
-                    self.cursor.execute("select coalesce(max(idGenre),0) from genre")
-                    genreid = self.cursor.fetchone()[0] + 1
-                    query = "INSERT INTO genre(idGenre, strGenre) values(?, ?)"
-                    self.cursor.execute(query, (genreid, genre))
-
-                query = "INSERT OR REPLACE INTO album_genre(idGenre, idAlbum) values(?, ?)"
-                self.cursor.execute(query, (genreid, kodiid))
-
-        elif mediatype == "song":
+        if mediatype == "song":
             
             # Delete current genres for clean slate
             query = ' '.join((
