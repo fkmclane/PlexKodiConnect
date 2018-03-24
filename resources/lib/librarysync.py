@@ -1171,7 +1171,8 @@ class LibrarySync(Thread):
         elif item['type'] in (v.PLEX_TYPE_SHOW,
                               v.PLEX_TYPE_SEASON,
                               v.PLEX_TYPE_EPISODE):
-            log.debug("Removing episode/season/tv show %s" % item['ratingKey'])
+            log.debug("Removing episode/season/show with plex id %s",
+                      item['ratingKey'])
             self.videoLibUpdate = True
             with itemtypes.TVShows() as show:
                 show.remove(item['ratingKey'])
@@ -1477,11 +1478,9 @@ class LibrarySync(Thread):
         stopped = self.stopped
         suspended = self.suspended
         installSyncDone = self.installSyncDone
-        background_sync = state.BACKGROUND_SYNC
         fullSync = self.fullSync
         processMessage = self.processMessage
         processItems = self.processItems
-        FULL_SYNC_INTERVALL = state.FULL_SYNC_INTERVALL
         lastSync = 0
         lastTimeSync = 0
         lastProcessing = 0
@@ -1599,7 +1598,7 @@ class LibrarySync(Thread):
                 now = unix_timestamp()
                 # Standard syncs - don't force-show dialogs
                 self.force_dialog = False
-                if (now - lastSync > FULL_SYNC_INTERVALL and
+                if (now - lastSync > state.FULL_SYNC_INTERVALL and
                         not self.xbmcplayer.isPlaying()):
                     lastSync = now
                     log.info('Doing scheduled full library scan')
@@ -1623,7 +1622,7 @@ class LibrarySync(Thread):
                     self.syncPMStime()
                     window('plex_dbScan', clear=True)
                     state.DB_SCAN = False
-                elif background_sync:
+                elif not state.BACKGROUND_SYNC_DISABLED:
                     # Check back whether we should process something
                     # Only do this once every while (otherwise, potentially
                     # many screen refreshes lead to flickering)

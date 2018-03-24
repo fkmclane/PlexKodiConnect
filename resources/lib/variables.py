@@ -75,7 +75,7 @@ COMPANION_PORT = int(_ADDON.getSetting('companionPort'))
 PKC_MACHINE_IDENTIFIER = None
 
 # Minimal PKC version needed for the Kodi database - otherwise need to recreate
-MIN_DB_VERSION = '2.0.4'
+MIN_DB_VERSION = '2.0.11'
 
 # Database paths
 _DB_VIDEO_VERSION = {
@@ -180,6 +180,14 @@ KODI_VIDEOTYPES = (
     KODI_TYPE_SET
 )
 
+PLEX_VIDEOTYPES = (
+    PLEX_TYPE_MOVIE,
+    PLEX_TYPE_CLIP,
+    PLEX_TYPE_EPISODE,
+    PLEX_TYPE_SEASON,
+    PLEX_TYPE_SHOW
+)
+
 KODI_AUDIOTYPES = (
     KODI_TYPE_SONG,
     KODI_TYPE_ALBUM,
@@ -191,7 +199,8 @@ KODI_AUDIOTYPES = (
 ADDON_TYPE = {
     PLEX_TYPE_MOVIE: 'plugin.video.plexkodiconnect.movies',
     PLEX_TYPE_CLIP: 'plugin.video.plexkodiconnect.movies',
-    PLEX_TYPE_EPISODE: 'plugin.video.plexkodiconnect.tvshows'
+    PLEX_TYPE_EPISODE: 'plugin.video.plexkodiconnect.tvshows',
+    PLEX_TYPE_SONG: 'plugin.video.plexkodiconnect'
 }
 
 ITEMTYPE_FROM_PLEXTYPE = {
@@ -307,6 +316,40 @@ PLEX_TYPE_FROM_WEBSOCKET = {
     10: PLEX_TYPE_SONG,
     12: PLEX_TYPE_CLIP
 }
+
+
+KODI_TO_PLEX_ARTWORK = {
+    'poster': 'thumb',
+    'banner': 'banner',
+    'fanart': 'art'
+}
+
+# Might be implemented in the future: 'icon', 'landscape' (16:9)
+ALL_KODI_ARTWORK = (
+    'thumb',
+    'poster',
+    'banner',
+    'clearart',
+    'clearlogo',
+    'fanart',
+    'discart'
+)
+
+# we need to use a little mapping between fanart.tv arttypes and kodi artttypes
+FANART_TV_TO_KODI_TYPE = [
+    ('poster', 'poster'),
+    ('logo', 'clearlogo'),
+    ('musiclogo', 'clearlogo'),
+    ('disc', 'discart'),
+    ('clearart', 'clearart'),
+    ('banner', 'banner'),
+    ('clearlogo', 'clearlogo'),
+    ('background', 'fanart'),
+    ('showbackground', 'fanart'),
+    ('characterart', 'characterart')
+]
+# How many different backgrounds do we want to load from fanart.tv?
+MAX_BACKGROUND_COUNT = 10
 
 
 # extensions from:

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 ###############################################################################
 from logging import getLogger
-from urllib import urlencode
 from ntpath import dirname
 from datetime import datetime
 
@@ -17,6 +16,9 @@ import state
 ###############################################################################
 
 LOG = getLogger("PLEX." + __name__)
+
+# Note: always use same order of URL arguments, NOT urlencode:
+#   plex_id=<plex_id>&plex_type=<plex_type>&mode=play
 
 ###############################################################################
 
@@ -82,11 +84,11 @@ class Items(object):
             allartworks = None
         else:
             with kodidb.GetKodiDB('video') as kodi_db:
-                allartworks = kodi_db.existingArt(kodi_id, kodi_type)
+                allartworks = kodi_db.get_art(kodi_id, kodi_type)
             # Check if we even need to get additional art
             needsupdate = False
-            for key, value in allartworks.iteritems():
-                if not value and not key == 'BoxRear':
+            for key in v.ALL_KODI_ARTWORK:
+                if key not in allartworks:
                     needsupdate = True
                     break
             if needsupdate is False:
@@ -107,19 +109,19 @@ class Items(object):
         api = API(xml[0])
         if allartworks is None:
             allartworks = api.artwork()
-        self.artwork.addArtwork(api.fanart_artwork(allartworks),
-                                kodi_id,
-                                kodi_type,
-                                self.kodicursor)
+        self.artwork.modify_artwork(api.fanart_artwork(allartworks),
+                                    kodi_id,
+                                    kodi_type,
+                                    self.kodicursor)
         # Also get artwork for collections/movie sets
         if kodi_type == v.KODI_TYPE_MOVIE:
             for setname in api.collection_list():
                 LOG.debug('Getting artwork for movie set %s', setname)
                 setid = self.kodi_db.createBoxset(setname)
-                self.artwork.addArtwork(api.set_artwork(),
-                                        setid,
-                                        v.KODI_TYPE_SET,
-                                        self.kodicursor)
+                self.artwork.modify_artwork(api.set_artwork(),
+                                            setid,
+                                            v.KODI_TYPE_SET,
+                                            self.kodicursor)
                 self.kodi_db.assignBoxset(setid, kodi_id)
         return True
 
@@ -201,7 +203,7 @@ class Movies(Items):
         plex_dbitem = plex_db.getItem_byId(itemid)
         try:
             movieid = plex_dbitem[0]
-            fileid = plex_dbitem[1]
+            old_fileid = plex_dbitem[1]
             pathid = plex_dbitem[2]
 
         except TypeError:
@@ -281,16 +283,23 @@ class Movies(Items):
                     # Network share
                     filename = playurl.rsplit("/", 1)[1]
                 path = playurl.replace(filename, "")
+                pathid = self.kodi_db.add_video_path(path,
+                                                     content='movies',
+                                                     scraper='metadata.local')
         if do_indirect:
             # Set plugin path and media flags using real filename
+            filename = api.file_path(force_first_media=True)
+            if "\\" in filename:
+                # Local path
+                filename = filename.rsplit("\\", 1)[1]
+            else:
+                # Network share
+                filename = filename.rsplit("/", 1)[1]
             path = 'plugin://%s.movies/' % v.ADDON_ID
-            params = {
-                'mode': 'play',
-                'plex_id': itemid,
-                'plex_type': v.PLEX_TYPE_MOVIE
-            }
-            filename = "%s?%s" % (path, urlencode(params))
+            filename = ('%s?plex_id=%s&plex_type=%s&mode=play&filename=%s'
+                        % (path, itemid, v.PLEX_TYPE_MOVIE, filename))
             playurl = filename
+            pathid = self.kodi_db.get_path(path)
 
         # movie table:
         # c22 - playurl
@@ -299,12 +308,14 @@ class Movies(Items):
 
         # add/retrieve pathid and fileid
         # if the path or file already exists, the calls return current value
-        pathid = self.kodi_db.addPath(path)
-        fileid = self.kodi_db.addFile(filename, pathid)
+        fileid = self.kodi_db.add_file(filename, pathid, dateadded)
 
         # UPDATE THE MOVIE #####
         if update_item:
             LOG.info("UPDATE movie itemid: %s - Title: %s", itemid, title)
+            if fileid != old_fileid:
+                LOG.debug('Removing old file entry: %s', old_fileid)
+                self.kodi_db.remove_file(old_fileid)
             # Update the movie entry
             if v.KODIVERSION >= 17:
                 # update new ratings Kodi 17
@@ -326,6 +337,7 @@ class Movies(Items):
                                                  "imdb",
                                                  uniqueid)
                 else:
+                    self.kodi_db.remove_uniqueid(movieid, v.KODI_TYPE_MOVIE)
                     uniqueid = -1
                 query = '''
                     UPDATE movie
@@ -360,7 +372,8 @@ class Movies(Items):
             LOG.info("ADD movie itemid: %s - Title: %s", itemid, title)
             if v.KODIVERSION >= 17:
                 # add new ratings Kodi 17
-                rating_id = self.kodi_db.create_entry_rating()
+                rating_id = self.kodi_db.get_ratingid(movieid,
+                                                      v.KODI_TYPE_MOVIE)
                 self.kodi_db.add_ratings(rating_id,
                                          movieid,
                                          v.KODI_TYPE_MOVIE,
@@ -369,7 +382,8 @@ class Movies(Items):
                                          votecount)
                 # add new uniqueid Kodi 17
                 if imdb is not None:
-                    uniqueid = self.kodi_db.create_entry_uniqueid()
+                    uniqueid = self.kodi_db.get_uniqueid(movieid,
+                                                         v.KODI_TYPE_MOVIE)
                     self.kodi_db.add_uniqueid(uniqueid,
                                               movieid,
                                               v.KODI_TYPE_MOVIE,
@@ -414,97 +428,84 @@ class Movies(Items):
                              parent_id=None,
                              checksum=checksum,
                              view_id=viewid)
-
-        # Update the path
-        query = ' '.join((
-
-            "UPDATE path",
-            "SET strPath = ?, strContent = ?, strScraper = ?, noUpdate = ?",
-            "WHERE idPath = ?"
-        ))
-        kodicursor.execute(query, (path, "movies", "metadata.local", 1, pathid))
-
-        # Update the file
-        query = ' '.join((
-
-            "UPDATE files",
-            "SET idPath = ?, strFilename = ?, dateAdded = ?",
-            "WHERE idFile = ?"
-        ))
-        kodicursor.execute(query, (pathid, filename, dateadded, fileid))
-
         # Process countries
-        self.kodi_db.addCountries(movieid, countries, "movie")
+        self.kodi_db.modify_countries(movieid, v.KODI_TYPE_MOVIE, countries)
         # Process cast
-        self.kodi_db.addPeople(movieid, api.people_list(), "movie")
+        self.kodi_db.modify_people(movieid,
+                                   v.KODI_TYPE_MOVIE,
+                                   api.people_list())
         # Process genres
-        self.kodi_db.addGenres(movieid, genres, "movie")
+        self.kodi_db.modify_genres(movieid, v.KODI_TYPE_MOVIE, genres)
         # Process artwork
-        artwork.addArtwork(api.artwork(), movieid, "movie", kodicursor)
+        artwork.modify_artwork(api.artwork(),
+                               movieid,
+                               v.KODI_TYPE_MOVIE,
+                               kodicursor)
         # Process stream details
-        self.kodi_db.addStreams(fileid, api.mediastreams(), runtime)
+        self.kodi_db.modify_streams(fileid, api.mediastreams(), runtime)
         # Process studios
-        self.kodi_db.addStudios(movieid, studios, "movie")
+        self.kodi_db.modify_studios(movieid, v.KODI_TYPE_MOVIE, studios)
         # Process tags: view, Plex collection tags
         tags = [viewtag]
         tags.extend(collections)
         if userdata['Favorite']:
             tags.append("Favorite movies")
-        self.kodi_db.addTags(movieid, tags, "movie")
+        self.kodi_db.modify_tags(movieid, v.KODI_TYPE_MOVIE, tags)
         # Add any sets from Plex collection tags
         self.kodi_db.addSets(movieid, collections, kodicursor)
         # Process playstates
         self.kodi_db.addPlaystate(fileid, resume, runtime, playcount, dateplayed)
 
-    def remove(self, itemid):
+    def remove(self, plex_id):
         """
-        Remove movieid, fileid, plex reference
+        Remove a movie with all references and all orphaned associated entries
+        from the Kodi DB
         """
-        plex_db = self.plex_db
-        kodicursor = self.kodicursor
-        artwork = self.artwork
-
-        plex_dbitem = plex_db.getItem_byId(itemid)
+        plex_dbitem = self.plex_db.getItem_byId(plex_id)
         try:
             kodi_id = plex_dbitem[0]
             file_id = plex_dbitem[1]
             kodi_type = plex_dbitem[4]
-            LOG.info("Removing %sid: %s file_id: %s",
-                     kodi_type, kodi_id, file_id)
+            LOG.debug('Removing %sid: %s file_id: %s',
+                      kodi_type, kodi_id, file_id)
         except TypeError:
+            LOG.error('Movie with plex_id %s not found in DB - cannot delete',
+                      plex_id)
             return
 
         # Remove the plex reference
-        plex_db.removeItem(itemid)
+        self.plex_db.removeItem(plex_id)
         # Remove artwork
-        artwork.deleteArtwork(kodi_id, kodi_type, kodicursor)
-
+        self.artwork.delete_artwork(kodi_id, kodi_type, self.kodicursor)
         if kodi_type == v.KODI_TYPE_MOVIE:
-            self.kodi_db.delete_countries(kodi_id, kodi_type)
-            self.kodi_db.delete_people(kodi_id, kodi_type)
-            self.kodi_db.delete_genre(kodi_id, kodi_type)
-            self.kodi_db.delete_studios(kodi_id, kodi_type)
-            self.kodi_db.delete_tags(kodi_id, kodi_type)
+            set_id = self.kodi_db.get_set_id(kodi_id)
+            self.kodi_db.modify_countries(kodi_id, kodi_type)
+            self.kodi_db.modify_people(kodi_id, kodi_type)
+            self.kodi_db.modify_genres(kodi_id, kodi_type)
+            self.kodi_db.modify_studios(kodi_id, kodi_type)
+            self.kodi_db.modify_tags(kodi_id, kodi_type)
             # Delete kodi movie and file
-            kodicursor.execute("DELETE FROM movie WHERE idMovie = ?",
-                               (kodi_id,))
-            kodicursor.execute("DELETE FROM files WHERE idFile = ?",
-                               (file_id,))
+            self.kodi_db.remove_file(file_id)
+            self.kodicursor.execute("DELETE FROM movie WHERE idMovie = ?",
+                                    (kodi_id,))
+            if set_id:
+                self.kodi_db.delete_possibly_empty_set(set_id)
             if v.KODIVERSION >= 17:
                 self.kodi_db.remove_uniqueid(kodi_id, kodi_type)
                 self.kodi_db.remove_ratings(kodi_id, kodi_type)
         elif kodi_type == v.KODI_TYPE_SET:
             # Delete kodi boxset
-            boxset_movies = plex_db.getItem_byParentId(kodi_id,
-                                                       v.KODI_TYPE_MOVIE)
+            boxset_movies = self.plex_db.getItem_byParentId(kodi_id,
+                                                            v.KODI_TYPE_MOVIE)
             for movie in boxset_movies:
                 plexid = movie[0]
                 movieid = movie[1]
-                self.kodi_db.removefromBoxset(movieid)
+                self.kodi_db.remove_from_set(movieid)
                 # Update plex reference
-                plex_db.updateParentId(plexid, None)
-            kodicursor.execute("DELETE FROM sets WHERE idSet = ?", (kodi_id,))
-        LOG.info("Deleted %s %s from kodi database", kodi_type, itemid)
+                self.plex_db.updateParentId(plexid, None)
+            self.kodicursor.execute("DELETE FROM sets WHERE idSet = ?",
+                                    (kodi_id,))
+        LOG.debug("Deleted %s %s from kodi database", kodi_type, plex_id)
 
 
 class TVShows(Items):
@@ -520,10 +521,8 @@ class TVShows(Items):
         plex_db = self.plex_db
         artwork = self.artwork
         api = API(item)
-
         update_item = True
         itemid = api.plex_id()
-
         if not itemid:
             LOG.error("Cannot parse XML data for TV show")
             return
@@ -536,7 +535,6 @@ class TVShows(Items):
             update_item = False
             kodicursor.execute("select coalesce(max(idShow),0) from tvshow")
             showid = kodicursor.fetchone()[0] + 1
-
         else:
             # Verification the item is still in Kodi
             query = "SELECT * FROM tvshow WHERE idShow = ?"
@@ -551,7 +549,6 @@ class TVShows(Items):
 
         # fileId information
         checksum = api.checksum()
-
         # item details
         genres = api.genre_list()
         title, sorttitle = api.titles()
@@ -570,37 +567,34 @@ class TVShows(Items):
             studio = None
 
         # GET THE FILE AND PATH #####
-        do_indirect = not state.DIRECT_PATHS
         if state.DIRECT_PATHS:
             # Direct paths is set the Kodi way
-            playurl = api.tv_show_path()
+            playurl = api.validate_playurl(api.tv_show_path(),
+                                           api.plex_type(),
+                                           folder=True)
             if playurl is None:
-                # Something went wrong, trying to use non-direct paths
-                do_indirect = True
+                return
+            if "\\" in playurl:
+                # Local path
+                path = "%s\\" % playurl
+                toplevelpath = "%s\\" % dirname(dirname(path))
             else:
-                playurl = api.validate_playurl(playurl,
-                                               api.plex_type(),
-                                               folder=True)
-                if playurl is None:
-                    return False
-                if "\\" in playurl:
-                    # Local path
-                    path = "%s\\" % playurl
-                    toplevelpath = "%s\\" % dirname(dirname(path))
-                else:
-                    # Network path
-                    path = "%s/" % playurl
-                    toplevelpath = "%s/" % dirname(dirname(path))
-        if do_indirect:
+                # Network path
+                path = "%s/" % playurl
+                toplevelpath = "%s/" % dirname(dirname(path))
+            toppathid = self.kodi_db.add_video_path(
+                toplevelpath,
+                content='tvshows',
+                scraper='metadata.local')
+        else:
             # Set plugin path
             toplevelpath = "plugin://%s.tvshows/" % v.ADDON_ID
             path = "%s%s/" % (toplevelpath, itemid)
+            toppathid = self.kodi_db.get_path(toplevelpath)
 
-        # Add top path
-        toppathid = self.kodi_db.addPath(toplevelpath)
-        # add/retrieve pathid and fileid
-        # if the path or file already exists, the calls return current value
-        pathid = self.kodi_db.addPath(path)
+        pathid = self.kodi_db.add_video_path(path,
+                                             date_added=api.date_created(),
+                                             id_parent_path=toppathid)
         # UPDATE THE TVSHOW #####
         if update_item:
             LOG.info("UPDATE tvshow itemid: %s - Title: %s", itemid, title)
@@ -632,6 +626,7 @@ class TVShows(Items):
                                                  "unknown",
                                                  uniqueid)
                 else:
+                    self.kodi_db.remove_uniqueid(showid, v.KODI_TYPE_SHOW)
                     uniqueid = -1
                 # Update the tvshow entry
                 query = '''
@@ -659,16 +654,6 @@ class TVShows(Items):
         # OR ADD THE TVSHOW #####
         else:
             LOG.info("ADD tvshow itemid: %s - Title: %s", itemid, title)
-            query = '''
-                UPDATE path
-                SET strPath = ?, strContent = ?, strScraper = ?, noUpdate = ?
-                WHERE idPath = ?
-            '''
-            kodicursor.execute(query, (toplevelpath,
-                                       "tvshows",
-                                       "metadata.local",
-                                       1,
-                                       toppathid))
             # Link the path
             query = "INSERT INTO tvshowlinkpath(idShow, idPath) values (?, ?)"
             kodicursor.execute(query, (showid, pathid))
@@ -682,7 +667,7 @@ class TVShows(Items):
                                  view_id=viewid)
             if v.KODIVERSION >= 17:
                 # add new ratings Kodi 17
-                rating_id = self.kodi_db.create_entry_rating()
+                rating_id = self.kodi_db.get_ratingid(showid, v.KODI_TYPE_SHOW)
                 self.kodi_db.add_ratings(rating_id,
                                          showid,
                                          v.KODI_TYPE_SHOW,
@@ -691,7 +676,8 @@ class TVShows(Items):
                                          votecount)
                 # add new uniqueid Kodi 17
                 if tvdb is not None:
-                    uniqueid = self.kodi_db.create_entry_uniqueid()
+                    uniqueid = self.kodi_db.get_uniqueid(showid,
+                                                         v.KODI_TYPE_SHOW)
                     self.kodi_db.add_uniqueid(uniqueid,
                                               showid,
                                               v.KODI_TYPE_SHOW,
@@ -720,29 +706,19 @@ class TVShows(Items):
                 kodicursor.execute(query, (showid, title, plot, rating,
                                            premieredate, genre, title, tvdb,
                                            mpaa, studio, sorttitle))
-        # Update the path
-        query = '''
-            UPDATE path
-            SET strPath = ?, strContent = ?, strScraper = ?, noUpdate = ?,
-            idParentPath = ?
-            WHERE idPath = ?
-        '''
-        kodicursor.execute(query, (path, None, None, 1, toppathid, pathid))
 
-        # Process cast
-        people = api.people_list()
-        self.kodi_db.addPeople(showid, people, "tvshow")
-        # Process genres
-        self.kodi_db.addGenres(showid, genres, "tvshow")
-        # Process artwork
-        allartworks = api.artwork()
-        artwork.addArtwork(allartworks, showid, "tvshow", kodicursor)
+        self.kodi_db.modify_people(showid, v.KODI_TYPE_SHOW, api.people_list())
+        self.kodi_db.modify_genres(showid, v.KODI_TYPE_SHOW, genres)
+        artwork.modify_artwork(api.artwork(),
+                               showid,
+                               v.KODI_TYPE_SHOW,
+                               kodicursor)
         # Process studios
-        self.kodi_db.addStudios(showid, studios, "tvshow")
+        self.kodi_db.modify_studios(showid, v.KODI_TYPE_SHOW, studios)
         # Process tags: view, PMS collection tags
         tags = [viewtag]
         tags.extend(collections)
-        self.kodi_db.addTags(showid, tags, "tvshow")
+        self.kodi_db.modify_tags(showid, v.KODI_TYPE_SHOW, tags)
 
     @catch_exceptions(warnuser=True)
     def add_updateSeason(self, item, viewtag=None, viewid=None):
@@ -759,7 +735,7 @@ class TVShows(Items):
         artwork = self.artwork
         seasonnum = api.season_number()
         # Get parent tv show Plex id
-        plexshowid = item.attrib.get('parentRatingKey')
+        plexshowid = api.parent_plex_id()
         # Get Kodi showid
         plex_dbitem = plex_db.getItem_byId(plexshowid)
         try:
@@ -768,17 +744,15 @@ class TVShows(Items):
             LOG.error('Could not find parent tv show for season %s. '
                       'Skipping season for now.', plex_id)
             return
-
-        seasonid = self.kodi_db.addSeason(showid, seasonnum)
+        seasonid = self.kodi_db.add_season(showid, seasonnum)
         checksum = api.checksum()
         # Check whether Season already exists
         plex_dbitem = plex_db.getItem_byId(plex_id)
         update_item = False if plex_dbitem is None else True
-
-        # Process artwork
-        allartworks = api.artwork()
-        artwork.addArtwork(allartworks, seasonid, "season", kodicursor)
-
+        artwork.modify_artwork(api.artwork(),
+                               seasonid,
+                               v.KODI_TYPE_SEASON,
+                               kodicursor)
         if update_item:
             # Update a reference: checksum in plex table
             plex_db.updateReference(plex_id, checksum)
@@ -801,10 +775,6 @@ class TVShows(Items):
         plex_db = self.plex_db
         artwork = self.artwork
         api = API(item)
-
-        # If the item already exist in the local Kodi DB we'll perform a full
-        # item update
-        # If the item doesn't exist, we'll add it to the database
         update_item = True
         itemid = api.plex_id()
         if not itemid:
@@ -813,23 +783,23 @@ class TVShows(Items):
         plex_dbitem = plex_db.getItem_byId(itemid)
         try:
             episodeid = plex_dbitem[0]
-            fileid = plex_dbitem[1]
+            old_fileid = plex_dbitem[1]
             pathid = plex_dbitem[2]
         except TypeError:
             update_item = False
             # episodeid
-            kodicursor.execute("select coalesce(max(idEpisode),0) from episode")
+            kodicursor.execute('SELECT COALESCE(MAX(idEpisode),0) FROM episode')
             episodeid = kodicursor.fetchone()[0] + 1
         else:
             # Verification the item is still in Kodi
-            query = "SELECT * FROM episode WHERE idEpisode = ?"
+            query = 'SELECT * FROM episode WHERE idEpisode = ?'
             kodicursor.execute(query, (episodeid,))
             try:
                 kodicursor.fetchone()[0]
             except TypeError:
                 # item is not found, let's recreate it.
                 update_item = False
-                LOG.info("episodeid: %s missing from Kodi, repairing entry.",
+                LOG.info('episodeid: %s missing from Kodi, repairing entry.',
                          episodeid)
 
         # fileId information
@@ -858,21 +828,6 @@ class TVShows(Items):
             season = -1
         if episode is None:
             episode = -1
-            # if item.get('AbsoluteEpisodeNumber'):
-            #     # Anime scenario
-            #     season = 1
-            #     episode = item['AbsoluteEpisodeNumber']
-            # else:
-            #     season = -1
-
-        # # Specials ordering within season
-        # if item.get('AirsAfterSeasonNumber'):
-        #     airs_before_season = item['AirsAfterSeasonNumber']
-        #     # Kodi default number for afterseason ordering
-        #     airs_before_episode = 4096
-        # else:
-        #     airs_before_season = item.get('AirsBeforeSeasonNumber')
-        #     airs_before_episode = item.get('AirsBeforeEpisodeNumber')
         airs_before_season = "-1"
         airs_before_episode = "-1"
 
@@ -883,48 +838,49 @@ class TVShows(Items):
         except TypeError:
             LOG.error("Parent tvshow now found, skip item")
             return False
-        seasonid = self.kodi_db.addSeason(showid, season)
+        seasonid = self.kodi_db.add_season(showid, season)
 
         # GET THE FILE AND PATH #####
-        do_indirect = not state.DIRECT_PATHS
-        playurl = api.file_path(force_first_media=True)
         if state.DIRECT_PATHS:
-            # Direct paths is set the Kodi way
-            if playurl is None:
-                # Something went wrong, trying to use non-direct paths
-                do_indirect = True
+            playurl = api.file_path(force_first_media=True)
+            playurl = api.validate_playurl(playurl, v.PLEX_TYPE_EPISODE)
+            if "\\" in playurl:
+                # Local path
+                filename = playurl.rsplit("\\", 1)[1]
             else:
-                playurl = api.validate_playurl(playurl, api.plex_type())
-                if playurl is None:
-                    return False
-                if "\\" in playurl:
-                    # Local path
-                    filename = playurl.rsplit("\\", 1)[1]
-                else:
-                    # Network share
-                    filename = playurl.rsplit("/", 1)[1]
-                path = playurl.replace(filename, "")
-                parent_path_id = self.kodi_db.getParentPathId(path)
-        if do_indirect:
+                # Network share
+                filename = playurl.rsplit("/", 1)[1]
+            path = playurl.replace(filename, "")
+            parent_path_id = self.kodi_db.parent_path_id(path)
+            pathid = self.kodi_db.add_video_path(path,
+                                                 id_parent_path=parent_path_id)
+        else:
             # Set plugin path - do NOT use "intermediate" paths for the show
             # as with direct paths!
+            filename = api.file_path(force_first_media=True)
+            if "\\" in filename:
+                # Local path
+                filename = filename.rsplit("\\", 1)[1]
+            else:
+                # Network share
+                filename = filename.rsplit("/", 1)[1]
             path = 'plugin://%s.tvshows/' % v.ADDON_ID
-            params = {
-                'plex_id': itemid,
-                'plex_type': v.PLEX_TYPE_EPISODE,
-                'mode': 'play'
-            }
-            filename = "%s?%s" % (path, urlencode(params))
+            filename = ('%s?plex_id=%s&plex_type=%s&mode=play&filename=%s'
+                        % (path, itemid, v.PLEX_TYPE_EPISODE, filename))
             playurl = filename
+            # Root path tvshows/ already saved in Kodi DB
+            pathid = self.kodi_db.add_video_path(path)
 
         # add/retrieve pathid and fileid
         # if the path or file already exists, the calls return current value
-        pathid = self.kodi_db.addPath(path)
-        fileid = self.kodi_db.addFile(filename, pathid)
+        fileid = self.kodi_db.add_file(filename, pathid, dateadded)
 
         # UPDATE THE EPISODE #####
         if update_item:
             LOG.info("UPDATE episode itemid: %s", itemid)
+            if fileid != old_fileid:
+                LOG.debug('Removing old file entry: %s', old_fileid)
+                self.kodi_db.remove_file(old_fileid)
             # Update the movie entry
             if v.KODIVERSION >= 17:
                 # update new ratings Kodi 17
@@ -952,11 +908,11 @@ class TVShows(Items):
                         userrating = ?
                     WHERE idEpisode = ?
                 '''
-                kodicursor.execute(query, (title, plot, rating, writer,
+                kodicursor.execute(query, (title, plot, ratingid, writer,
                     premieredate, runtime, director, season, episode, title,
                     airs_before_season, airs_before_episode, playurl, pathid,
                     fileid, seasonid, userdata['UserRating'], episodeid))
-            elif v.KODIVERSION == 16:
+            else:
                 # Kodi Jarvis
                 query = '''
                     UPDATE episode
@@ -969,18 +925,6 @@ class TVShows(Items):
                     premieredate, runtime, director, season, episode, title,
                     airs_before_season, airs_before_episode, playurl, pathid,
                     fileid, seasonid, episodeid))
-            else:
-                query = '''
-                    UPDATE episode
-                    SET c00 = ?, c01 = ?, c03 = ?, c04 = ?, c05 = ?, c09 = ?,
-                        c10 = ?, c12 = ?, c13 = ?, c14 = ?, c15 = ?, c16 = ?,
-                        c18 = ?, c19 = ?, idFile = ?
-                    WHERE idEpisode = ?
-                '''
-                kodicursor.execute(query, (title, plot, rating, writer,
-                    premieredate, runtime, director, season, episode, title,
-                    airs_before_season, airs_before_episode, playurl, pathid,
-                    fileid, episodeid))
             # Update parentid reference
             plex_db.updateParentId(itemid, seasonid)
 
@@ -990,7 +934,8 @@ class TVShows(Items):
             # Create the episode entry
             if v.KODIVERSION >= 17:
                 # add new ratings Kodi 17
-                rating_id = self.kodi_db.create_entry_rating()
+                rating_id = self.kodi_db.get_ratingid(episodeid,
+                                                      v.KODI_TYPE_EPISODE)
                 self.kodi_db.add_ratings(rating_id,
                                          episodeid,
                                          v.KODI_TYPE_EPISODE,
@@ -998,7 +943,9 @@ class TVShows(Items):
                                          rating,
                                          votecount)
                 # add new uniqueid Kodi 17
-                self.kodi_db.add_uniqueid(self.kodi_db.create_entry_uniqueid(),
+                uniqueid = self.kodi_db.get_uniqueid(episodeid,
+                                                     v.KODI_TYPE_EPISODE)
+                self.kodi_db.add_uniqueid(uniqueid,
                                           episodeid,
                                           v.KODI_TYPE_EPISODE,
                                           tvdb,
@@ -1015,7 +962,7 @@ class TVShows(Items):
                     episode, title, showid, airs_before_season,
                     airs_before_episode, playurl, pathid, seasonid,
                     userdata['UserRating']))
-            elif v.KODIVERSION == 16:
+            else:
                 # Kodi Jarvis
                 query = '''
                     INSERT INTO episode( idEpisode, idFile, c00, c01, c03, c04,
@@ -1028,20 +975,6 @@ class TVShows(Items):
                     rating, writer, premieredate, runtime, director, season,
                     episode, title, showid, airs_before_season,
                     airs_before_episode, playurl, pathid, seasonid))
-            else:
-                query = (
-                    '''
-                    INSERT INTO episode(
-                        idEpisode, idFile, c00, c01, c03, c04, c05, c09, c10, c12, c13, c14,
-                        idShow, c15, c16, c18, c19)
-
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    '''
-                )
-                kodicursor.execute(query, (episodeid, fileid, title, plot,
-                    rating, writer, premieredate, runtime, director, season,
-                    episode, title, showid, airs_before_season,
-                    airs_before_episode, playurl, pathid))
 
         # Create or update the reference in plex table Add reference is
         # idempotent; the call here updates also fileid and pathid when item is
@@ -1055,193 +988,133 @@ class TVShows(Items):
                              parent_id=seasonid,
                              checksum=checksum,
                              view_id=viewid)
-
-        # Update the path for Direct Paths only
-        if not do_indirect:
-            query = '''
-                UPDATE path
-                SET strPath = ?, strContent = ?, strScraper = ?, noUpdate = ?,
-                    idParentPath = ?
-                WHERE idPath = ?
-            '''
-            kodicursor.execute(query, (path, None, None, 1, parent_path_id,
-                                       pathid))
-        # Update the file
-        query = ' '.join((
-
-            "UPDATE files",
-            "SET idPath = ?, strFilename = ?, dateAdded = ?",
-            "WHERE idFile = ?"
-        ))
-        kodicursor.execute(query, (pathid, filename, dateadded, fileid))
-        # Process cast
-        people = api.people_list()
-        self.kodi_db.addPeople(episodeid, people, "episode")
-        # Process artwork
-        # Wide "screenshot" of particular episode
-        poster = item.attrib.get('thumb')
-        if poster:
-            poster = api.attach_plex_token_to_url(
-                "%s%s" % (self.server, poster))
-            artwork.addOrUpdateArt(
-                poster, episodeid, "episode", "thumb", kodicursor)
-
-        # Process stream details
+        self.kodi_db.modify_people(episodeid,
+                                   v.KODI_TYPE_EPISODE,
+                                   api.people_list())
+        artwork.modify_artwork(api.artwork(),
+                               episodeid,
+                               v.KODI_TYPE_EPISODE,
+                               kodicursor)
         streams = api.mediastreams()
-        self.kodi_db.addStreams(fileid, streams, runtime)
-        # Process playstates
+        self.kodi_db.modify_streams(fileid, streams, runtime)
         self.kodi_db.addPlaystate(fileid,
                                   resume,
                                   runtime,
                                   playcount,
                                   dateplayed)
 
-    def remove(self, itemid):
+    @catch_exceptions(warnuser=True)
+    def remove(self, plex_id):
         """
-        Remove showid, fileid, pathid, plex reference
+        Remove the entire TV shows object (show, season or episode) including
+        all associated entries from the Kodi DB.
         """
-        plex_db = self.plex_db
-        kodicursor = self.kodicursor
-
-        plex_dbitem = plex_db.getItem_byId(itemid)
-        try:
-            kodiid = plex_dbitem[0]
-            fileid = plex_dbitem[1]
-            parentid = plex_dbitem[3]
-            mediatype = plex_dbitem[4]
-            LOG.info("Removing %s kodiid: %s fileid: %s",
-                     mediatype, kodiid, fileid)
-        except TypeError:
+        plex_dbitem = self.plex_db.getItem_byId(plex_id)
+        if plex_dbitem is None:
+            LOG.info('Cannot delete plex_id %s - not found in DB', plex_id)
             return
-
-        ##### PROCESS ITEM #####
+        kodi_id = plex_dbitem[0]
+        file_id = plex_dbitem[1]
+        parent_id = plex_dbitem[3]
+        kodi_type = plex_dbitem[4]
+        LOG.info("Removing %s with kodi_id: %s file_id: %s parent_id: %s",
+                 kodi_type, kodi_id, file_id, parent_id)
 
         # Remove the plex reference
-        plex_db.removeItem(itemid)
+        self.plex_db.removeItem(plex_id)
 
-        ##### IF EPISODE #####
-
-        if mediatype == v.KODI_TYPE_EPISODE:
-            # Delete kodi episode and file, verify season and tvshow
-            self.removeEpisode(kodiid, fileid)
-
+        ##### EPISODE #####
+        if kodi_type == v.KODI_TYPE_EPISODE:
+            # Delete episode, verify season and tvshow
+            self.remove_episode(kodi_id, file_id)
             # Season verification
-            season = plex_db.getItem_byKodiId(parentid, v.KODI_TYPE_SEASON)
-            try:
-                showid = season[1]
-            except TypeError:
-                return
-            season_episodes = plex_db.getItem_byParentId(parentid,
-                                                         v.KODI_TYPE_EPISODE)
-            if not season_episodes:
-                self.removeSeason(parentid)
-                plex_db.removeItem(season[0])
-
-            # Show verification
-            show = plex_db.getItem_byKodiId(showid, v.KODI_TYPE_SHOW)
-            query = ' '.join((
-
-                "SELECT totalCount",
-                "FROM tvshowcounts",
-                "WHERE idShow = ?"
-            ))
-            kodicursor.execute(query, (showid,))
-            result = kodicursor.fetchone()
-            if result and result[0] is None:
-                # There's no episodes left, delete show and any possible remaining seasons
-                seasons = plex_db.getItem_byParentId(showid,
-                                                     v.KODI_TYPE_SEASON)
-                for season in seasons:
-                    self.removeSeason(season[1])
-                # Delete plex season entries
-                plex_db.removeItems_byParentId(showid,
-                                               v.KODI_TYPE_SEASON)
-                self.removeShow(showid)
-                plex_db.removeItem(show[0])
-
-        ##### IF TVSHOW #####
-
-        elif mediatype == v.KODI_TYPE_SHOW:
-            # Remove episodes, seasons, tvshow
-            seasons = plex_db.getItem_byParentId(kodiid,
-                                                 v.KODI_TYPE_SEASON)
-            for season in seasons:
-                seasonid = season[1]
-                season_episodes = plex_db.getItem_byParentId(
-                    seasonid, v.KODI_TYPE_EPISODE)
-                for episode in season_episodes:
-                    self.removeEpisode(episode[1], episode[2])
-                # Remove plex episodes
-                plex_db.removeItems_byParentId(seasonid,
-                                               v.KODI_TYPE_EPISODE)
-            # Remove plex seasons
-            plex_db.removeItems_byParentId(kodiid,
-                                           v.KODI_TYPE_SEASON)
-
-            # Remove tvshow
-            self.removeShow(kodiid)
-
-        ##### IF SEASON #####
-
-        elif mediatype == v.KODI_TYPE_SEASON:
+            season = self.plex_db.getItem_byKodiId(parent_id,
+                                                   v.KODI_TYPE_SEASON)
+            if not self.plex_db.getItem_byParentId(parent_id,
+                                                   v.KODI_TYPE_EPISODE):
+                # No episode left for season - so delete the season
+                self.remove_season(parent_id)
+                self.plex_db.removeItem(season[0])
+            show = self.plex_db.getItem_byKodiId(season[1],
+                                                 v.KODI_TYPE_SHOW)
+            if not self.plex_db.getItem_byParentId(season[1],
+                                                   v.KODI_TYPE_SEASON):
+                # No seasons for show left - so delete entire show
+                self.remove_show(season[1])
+                self.plex_db.removeItem(show[0])
+        ##### SEASON #####
+        elif kodi_type == v.KODI_TYPE_SEASON:
             # Remove episodes, season, verify tvshow
-            season_episodes = plex_db.getItem_byParentId(kodiid,
-                                                         v.KODI_TYPE_EPISODE)
-            for episode in season_episodes:
-                self.removeEpisode(episode[1], episode[2])
-            # Remove plex episodes
-            plex_db.removeItems_byParentId(kodiid, v.KODI_TYPE_EPISODE)
-
+            for episode in self.plex_db.getItem_byParentId(
+                    kodi_id, v.KODI_TYPE_EPISODE):
+                self.remove_episode(episode[1], episode[2])
+                self.plex_db.removeItem(episode[0])
             # Remove season
-            self.removeSeason(kodiid)
-
+            self.remove_season(kodi_id)
             # Show verification
-            seasons = plex_db.getItem_byParentId(parentid, v.KODI_TYPE_SEASON)
-            if not seasons:
-                # There's no seasons, delete the show
-                self.removeShow(parentid)
-                plex_db.removeItem_byKodiId(parentid, v.KODI_TYPE_SHOW)
-        LOG.debug("Deleted %s: %s from kodi database", mediatype, itemid)
+            if not self.plex_db.getItem_byParentId(parent_id,
+                                                   v.KODI_TYPE_SEASON):
+                # There's no other season left, delete the show
+                self.remove_show(parent_id)
+                self.plex_db.removeItem_byKodiId(parent_id, v.KODI_TYPE_SHOW)
+        ##### TVSHOW #####
+        elif kodi_type == v.KODI_TYPE_SHOW:
+            # Remove episodes, seasons and the tvshow itself
+            for season in self.plex_db.getItem_byParentId(kodi_id,
+                                                          v.KODI_TYPE_SEASON):
+                for episode in self.plex_db.getItem_byParentId(
+                        season[1], v.KODI_TYPE_EPISODE):
+                    self.remove_episode(episode[1], episode[2])
+                    self.plex_db.removeItem(episode[0])
+                self.remove_season(season[1])
+                self.plex_db.removeItem(season[0])
+            self.remove_show(kodi_id)
 
-    def removeShow(self, kodi_id):
+        LOG.debug("Deleted %s %s from Kodi database", kodi_type, plex_id)
+
+    def remove_show(self, kodi_id):
         """
         Remove a TV show, and only the show, no seasons or episodes
         """
-        kodicursor = self.kodicursor
-        self.kodi_db.delete_genre(kodi_id, v.KODI_TYPE_SHOW)
-        self.kodi_db.delete_studios(kodi_id, v.KODI_TYPE_SHOW)
-        self.kodi_db.delete_tags(kodi_id, v.KODI_TYPE_SHOW)
-        self.artwork.deleteArtwork(kodi_id, v.KODI_TYPE_SHOW, kodicursor)
-        kodicursor.execute("DELETE FROM tvshow WHERE idShow = ?", (kodi_id,))
+        self.kodi_db.modify_genres(kodi_id, v.KODI_TYPE_SHOW)
+        self.kodi_db.modify_studios(kodi_id, v.KODI_TYPE_SHOW)
+        self.kodi_db.modify_tags(kodi_id, v.KODI_TYPE_SHOW)
+        self.artwork.delete_artwork(kodi_id,
+                                    v.KODI_TYPE_SHOW,
+                                    self.kodicursor)
+        self.kodicursor.execute("DELETE FROM tvshow WHERE idShow = ?",
+                                (kodi_id,))
         if v.KODIVERSION >= 17:
             self.kodi_db.remove_uniqueid(kodi_id, v.KODI_TYPE_SHOW)
             self.kodi_db.remove_ratings(kodi_id, v.KODI_TYPE_SHOW)
-        LOG.info("Removed tvshow: %s.", kodi_id)
+        LOG.info("Removed tvshow: %s", kodi_id)
 
-    def removeSeason(self, kodi_id):
+    def remove_season(self, kodi_id):
         """
         Remove a season, and only a season, not the show or episodes
         """
-        kodicursor = self.kodicursor
-        self.artwork.deleteArtwork(kodi_id, "season", kodicursor)
-        kodicursor.execute("DELETE FROM seasons WHERE idSeason = ?",
-                           (kodi_id,))
-        LOG.info("Removed season: %s.", kodi_id)
+        self.artwork.delete_artwork(kodi_id,
+                                    v.KODI_TYPE_SEASON,
+                                    self.kodicursor)
+        self.kodicursor.execute("DELETE FROM seasons WHERE idSeason = ?",
+                                (kodi_id,))
+        LOG.info("Removed season: %s", kodi_id)
 
-    def removeEpisode(self, kodi_id, fileid):
+    def remove_episode(self, kodi_id, file_id):
         """
-        Remove an episode, and episode only
+        Remove an episode, and episode only from the Kodi DB (not Plex DB)
         """
-        kodicursor = self.kodicursor
-        self.kodi_db.delete_people(kodi_id, v.KODI_TYPE_EPISODE)
-        self.artwork.deleteArtwork(kodi_id, "episode", kodicursor)
-        kodicursor.execute("DELETE FROM episode WHERE idEpisode = ?",
-                           (kodi_id,))
-        kodicursor.execute("DELETE FROM files WHERE idFile = ?", (fileid,))
+        self.kodi_db.modify_people(kodi_id, v.KODI_TYPE_EPISODE)
+        self.kodi_db.remove_file(file_id)
+        self.artwork.delete_artwork(kodi_id,
+                                    v.KODI_TYPE_EPISODE,
+                                    self.kodicursor)
+        self.kodicursor.execute("DELETE FROM episode WHERE idEpisode = ?",
+                                (kodi_id,))
         if v.KODIVERSION >= 17:
             self.kodi_db.remove_uniqueid(kodi_id, v.KODI_TYPE_EPISODE)
             self.kodi_db.remove_ratings(kodi_id, v.KODI_TYPE_EPISODE)
-        LOG.info("Removed episode: %s.", kodi_id)
+        LOG.info("Removed episode: %s", kodi_id)
 
 
 class Music(Items):
@@ -1292,16 +1165,15 @@ class Music(Items):
         bio = api.plot()
 
         # Associate artwork
-        artworks = api.artwork(parent_info=True)
-        thumb = artworks['Primary']
-        backdrops = artworks['Backdrop']  # List
-
-        if thumb:
-            thumb = "<thumb>%s</thumb>" % thumb
-        if backdrops:
-            fanart = "<fanart>%s</fanart>" % backdrops[0]
+        artworks = api.artwork()
+        if 'poster' in artworks:
+            thumb = "<thumb>%s</thumb>" % artworks['poster']
         else:
-            fanart = ""
+            thumb = None
+        if 'fanart' in artworks:
+            fanart = "<fanart>%s</fanart>" % artworks['fanart']
+        else:
+            fanart = None
 
         # UPDATE THE ARTIST #####
         if update_item:
@@ -1346,7 +1218,10 @@ class Music(Items):
                                        dateadded, artistid))
 
         # Update artwork
-        artwork.addArtwork(artworks, artistid, v.KODI_TYPE_ARTIST, kodicursor)
+        artwork.modify_artwork(artworks,
+                               artistid,
+                               v.KODI_TYPE_ARTIST,
+                               kodicursor)
 
     @catch_exceptions(warnuser=True)
     def add_updateAlbum(self, item, viewtag=None, viewid=None, children=None,
@@ -1398,10 +1273,11 @@ class Music(Items):
                 self.compilation = 1
                 break
         # Associate artwork
-        artworks = api.artwork(parent_info=True)
-        thumb = artworks['Primary']
-        if thumb:
-            thumb = "<thumb>%s</thumb>" % thumb
+        artworks = api.artwork()
+        if 'poster' in artworks:
+            thumb = "<thumb>%s</thumb>" % artworks['poster']
+        else:
+            thumb = None
 
         # UPDATE THE ALBUM #####
         if update_item:
@@ -1478,7 +1354,7 @@ class Music(Items):
                                        studio, albumid))
 
         # Associate the parentid for plex reference
-        parent_id = item.attrib.get('parentRatingKey')
+        parent_id = api.parent_plex_id()
         if parent_id is not None:
             plex_dbartist = plex_db.getItem_byId(parent_id)
             try:
@@ -1539,7 +1415,7 @@ class Music(Items):
         # Add genres
         self.kodi_db.addMusicGenres(albumid, self.genres, v.KODI_TYPE_ALBUM)
         # Update artwork
-        artwork.addArtwork(artworks, albumid, v.KODI_TYPE_ALBUM, kodicursor)
+        artwork.modify_artwork(artworks, albumid, v.KODI_TYPE_ALBUM, kodicursor)
         # Add all children - all tracks
         if scan_children:
             for child in children:
@@ -1594,13 +1470,12 @@ class Music(Items):
             genre = None
         try:
             if self.compilation == 0:
-                artists = item.attrib.get('grandparentTitle')
+                artists = api.grandparent_title()
             else:
                 artists = item.attrib.get('originalTitle')
         except AttributeError:
             # compilation not set
-            artists = item.attrib.get('originalTitle',
-                                      item.attrib.get('grandparentTitle'))
+            artists = item.attrib.get('originalTitle', api.grandparent_title())
         tracknumber = int(item.attrib.get('index', 0))
         disc = int(item.attrib.get('parentIndex', 1))
         if disc == 1:
@@ -1675,12 +1550,11 @@ class Music(Items):
             LOG.info("ADD song itemid: %s - Title: %s", itemid, title)
 
             # Add path
-            pathid = self.kodi_db.addPath(path, strHash="123")
+            pathid = self.kodi_db.add_music_path(path, strHash="123")
 
             try:
                 # Get the album
-                plex_dbalbum = plex_db.getItem_byId(
-                    item.attrib.get('parentRatingKey'))
+                plex_dbalbum = plex_db.getItem_byId(api.parent_plex_id())
                 albumid = plex_dbalbum[0]
             except KeyError:
                 # Verify if there's an album associated.
@@ -1705,7 +1579,7 @@ class Music(Items):
             except TypeError:
                 # No album found. Let's create it
                 LOG.info("Album database entry missing.")
-                plex_album_id = item.attrib.get('parentRatingKey')
+                plex_album_id = api.parent_plex_id()
                 album = GetPlexMetadata(plex_album_id)
                 if album is None or album == 401:
                     LOG.error('Could not download album, abort')
@@ -1778,8 +1652,8 @@ class Music(Items):
 
         # Link song to artists
         artist_loop = [{
-            'Name': item.attrib.get('grandparentTitle'),
-            'Id': item.attrib.get('grandparentRatingKey')
+            'Name': api.grandparent_title(),
+            'Id': api.grandparent_id()
         }]
         # for index, artist in enumerate(item['ArtistItems']):
         for index, artist in enumerate(artist_loop):
@@ -1825,16 +1699,15 @@ class Music(Items):
         # Add genres
         if genres:
             self.kodi_db.addMusicGenres(songid, genres, v.KODI_TYPE_SONG)
-        # Update artwork
-        allart = api.artwork(parent_info=True)
-        artwork.addArtwork(allart, songid, v.KODI_TYPE_SONG, kodicursor)
+        artworks = api.artwork()
+        artwork.modify_artwork(artworks, songid, v.KODI_TYPE_SONG, kodicursor)
         if item.get('parentKey') is None:
             # Update album artwork
-            artwork.addArtwork(allart, albumid, v.KODI_TYPE_ALBUM, kodicursor)
+            artwork.modify_artwork(artworks, albumid, v.KODI_TYPE_ALBUM, kodicursor)
 
     def remove(self, itemid):
         """
-        Remove kodiid, fileid, pathid, plex reference
+        Remove kodiid, file_id, pathid, plex reference
         """
         plex_db = self.plex_db
 
@@ -1917,7 +1790,7 @@ class Music(Items):
         """
         Remove song, and only the song
         """
-        self.artwork.deleteArtwork(kodiid, v.KODI_TYPE_SONG, self.kodicursor)
+        self.artwork.delete_artwork(kodiid, v.KODI_TYPE_SONG, self.kodicursor)
         self.kodicursor.execute("DELETE FROM song WHERE idSong = ?",
                                 (kodiid,))
 
@@ -1925,7 +1798,7 @@ class Music(Items):
         """
         Remove an album, and only the album
         """
-        self.artwork.deleteArtwork(kodiid, v.KODI_TYPE_ALBUM, self.kodicursor)
+        self.artwork.delete_artwork(kodiid, v.KODI_TYPE_ALBUM, self.kodicursor)
         self.kodicursor.execute("DELETE FROM album WHERE idAlbum = ?",
                                 (kodiid,))
 
@@ -1933,7 +1806,7 @@ class Music(Items):
         """
         Remove an artist, and only the artist
         """
-        self.artwork.deleteArtwork(kodiid,
+        self.artwork.delete_artwork(kodiid,
                                    v.KODI_TYPE_ARTIST,
                                    self.kodicursor)
         self.kodicursor.execute("DELETE FROM artist WHERE idArtist = ?",

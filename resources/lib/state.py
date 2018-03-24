@@ -30,6 +30,8 @@ INDICATE_MEDIA_VERSIONS = False
 RUN_LIB_SCAN = None
 # Number of items to fetch and display in widgets
 FETCH_PMS_ITEM_NUMBER = None
+# Hack to force Kodi widget for "in progress" to show up if it was empty before
+FORCE_RELOAD_SKIN = True
 
 # Stemming from the PKC settings.xml
 # Shall we show Kodi dialogs when synching?
@@ -40,8 +42,8 @@ KODI_DB_CHECKED = False
 ENABLE_MUSIC = True
 # How often shall we sync?
 FULL_SYNC_INTERVALL = 0
-# Background Sync enabled at all?
-BACKGROUND_SYNC = True
+# Background Sync disabled?
+BACKGROUND_SYNC_DISABLED = False
 # How long shall we wait with synching a new item to make sure Plex got all
 # metadata?
 BACKGROUNDSYNC_SAFTYMARGIN = 0
@@ -108,7 +110,7 @@ OLD_PLAYER_STATES = {
     1: {},
     2: {}
 }
-# "empty" dict for the PLAYER_STATES above
+# "empty" dict for the PLAYER_STATES above. Use copy.deepcopy to duplicate!
 PLAYSTATE = {
     'type': None,
     'time': {
@@ -145,8 +147,6 @@ PLAYSTATE = {
 # paths for playback (since we're not receiving a Kodi id)
 PLEX_IDS = {}
 PLAYED_INFO = {}
-# Flag whether Kodi item where the playback is being started is even resumable
-RESUMABLE = False
 # Set by SpecialMonitor - did user choose to resume playback or start from the
 # beginning?
 RESUME_PLAYBACK = False

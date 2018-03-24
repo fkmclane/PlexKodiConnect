@@ -53,11 +53,9 @@ def chooseServer():
     if not __LogOut():
         return
 
-    from utils import delete_playlists, delete_nodes
-    # First remove playlists
-    delete_playlists()
-    # Remove video nodes
-    delete_nodes()
+    from utils import wipe_database
+    # Wipe Kodi and Plex database as well as playlists and video nodes
+    wipe_database()
 
     # Log in again
     __LogIn()
@@ -564,13 +562,8 @@ def getOnDeck(viewid, mediatype, tagname, limit):
             if directpaths:
                 url = api.file_path()
             else:
-                params = {
-                    'mode': "play",
-                    'plex_id': api.plex_id(),
-                    'plex_type': api.plex_type()
-                }
-                url = "plugin://plugin.video.plexkodiconnect/tvshows/?%s" \
-                      % urlencode(params)
+                url = ('plugin://%s.tvshows/?plex_id=%s&plex_type=%s&mode=play'
+                       % (v.ADDON_ID, api.plex_id(), api.plex_type()))
             xbmcplugin.addDirectoryItem(
                 handle=HANDLE,
                 url=url,
@@ -838,12 +831,8 @@ def __build_item(xml_element):
     elif api.plex_type() == v.PLEX_TYPE_PHOTO:
         url = api.get_picture_path()
     else:
-        params = {
-            'mode': 'play',
-            'plex_id': api.plex_id(),
-            'plex_type': api.plex_type(),
-        }
-        url = "plugin://%s?%s" % (v.ADDON_ID, urlencode(params))
+        url = 'plugin://%s/?plex_id=%s&plex_type=%s&mode=play' \
+              % (v.ADDON_TYPE[api.plex_type()], api.plex_id(), api.plex_type())
     xbmcplugin.addDirectoryItem(handle=HANDLE,
                                 url=url,
                                 listitem=listitem)

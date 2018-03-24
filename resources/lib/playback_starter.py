@@ -4,10 +4,12 @@ from logging import getLogger
 from threading import Thread
 from urlparse import parse_qsl
 
-from pickler import pickle_me, Playback_Successful
 import playback
 from context_entry import ContextMenu
 import state
+import json_rpc as js
+from pickler import pickle_me, Playback_Successful
+import kodidb_functions as kodidb
 
 ###############################################################################
 
@@ -21,7 +23,19 @@ class Playback_Starter(Thread):
     Processes new plays
     """
     def triage(self, item):
-        _, params = item.split('?', 1)
+        try:
+            _, params = item.split('?', 1)
+        except ValueError:
+            # e.g. when plugin://...tvshows is called for entire season
+            with kodidb.GetKodiDB('video') as kodi_db:
+                show_id = kodi_db.show_id_from_path(item)
+            if show_id:
+                js.activate_window('videos',
+                                   'videodb://tvshows/titles/%s' % show_id)
+            else:
+                LOG.error('Could not find tv show id for %s', item)
+            pickle_me(Playback_Successful())
+            return
         params = dict(parse_qsl(params))
         mode = params.get('mode')
         LOG.debug('Received mode: %s, params: %s', mode, params)
@@ -34,7 +48,7 @@ class Playback_Starter(Thread):
         elif mode == 'context_menu':
             ContextMenu(kodi_id=params['kodi_id'],
                         kodi_type=params['kodi_type'])
- 
+
     def run(self):
         queue = state.COMMAND_PIPELINE_QUEUE
         LOG.info("----===## Starting Playback_Starter ##===----")

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon  id="plugin.video.plexkodiconnect" name="PlexKodiConnect" version="2.0.4" provider-name="croneter">
+<addon  id="plugin.video.plexkodiconnect" name="PlexKodiConnect" version="2.0.12" provider-name="croneter">
   <requires>
     <import addon="xbmc.python" version="2.1.0"/>
     <import addon="script.module.requests" version="2.9.1" />
     <import addon="plugin.video.plexkodiconnect.movies" version="2.0.0" />
-    <import addon="plugin.video.plexkodiconnect.tvshows" version="2.0.0" />
+    <import addon="plugin.video.plexkodiconnect.tvshows" version="2.0.1" />
   </requires>
   <extension point="xbmc.python.pluginsource" library="default.py">
         <provides>video audio image</provides>
@@ -61,7 +61,62 @@
     <summary lang="da_DK">Indbygget Integration af Plex i Kodi</summary>
     <description lang="da_DK">Tilslut Kodi til din Plex Media Server. Dette plugin forudsætter, at du administrere alle dine videoer med Plex (og ikke med Kodi). Du kan miste data som allerede er gemt i Kodi video og musik-databaser (dette plugin ændrer direkte i dem). Brug på eget ansvar!</description>
     <disclaimer lang="da_DK">Brug på eget ansvar</disclaimer>
-    <news>version 2.0.4 (beta only):
+    <news>version 2.0.12 (beta only):
+- Fix resume not working for some Kodi interface languages
+- Fix widget navigating to entire TV show not working
+- Fix library sync crash TypeError
+- Revert "Revert "Fix for "In Progress" not appearing""
+- Simplify error message
+
+version 2.0.11 (beta only):
+- WARNING: You will need to reset the Kodi database!
+- Fix playback for add-on paths
+- Fix artwork for episodes for add-on paths
+- Revert "Fix for "In Progress" not appearing"
+- Fix playback resuming potentially too often
+
+version 2.0.10 (beta only):
+- Fix wrong item being reported using direct paths
+- Direct paths: correctly clean up after context menu play
+- Always resume playback if playback initiated via context menu
+- Do not play trailers for resumable movies using playback via PMS
+- Fix for "In Progress" widget not appearing 
+- Fix correctly recording ended (not stopped!) video
+- Don't record last played date if state unwatched
+- Clean Kodi DB more thoroughly after playback start via PMS
+
+version 2.0.9 (beta only):
+- Fix AttributeError on playback start
+
+version 2.0.8 (beta only):
+- Fix videos not being correctly marked as played
+- Improve playback startup resiliance
+- Fix playerstates not being copied/reset correctly
+- Fix tv shows not being correctly deleted
+- Fix episode rating not being correct
+- Make generally sure that we're correctly deleting videos from the Kodi DB
+- Fix disabling of background sync (websockets) 
+
+version 2.0.7 (beta only):
+- Fix another UnicodeDecodeError for playlists
+- Hardcode plugin-calls instead of using urlencode
+- Fix Kodi 18 log warnings by declaring all settings variables
+
+version 2.0.6 (beta only):
+- Addon paths playback was basically broken - hope it works again!
+- Fixes to add-on paths playback startup
+- Fix UnicodeDecodeError for playqueue logging 
+
+version 2.0.5 (beta only):
+- WARNING: You will need to reset the Kodi database!
+- Fix art and show info not showing for addon paths
+- Fix episode information not working
+- Big Kodi DB overhaul - ensure video metadata updates/deletes correctly
+- Artwork code overhaul
+- Greatly speed up switch of PMS
+- And a lot of other stuff
+
+version 2.0.4 (beta only):
 - WARNING: You will need to reset the Kodi database!
 - Many improvements to the Kodi database handling which should get rid of some weird bugs
 - Many improvements to playback startup
